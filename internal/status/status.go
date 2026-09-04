@@ -372,8 +372,12 @@ func (e *Engine) LastMessageText(tool, pane string) (text string, anchored, ok b
 // several marker-led paragraphs (Claude's bulleted sections, for example)
 // has several message_start matches, and LastMessageText only keeps the
 // last one. This keeps every line of the region instead, chrome, busy
-// spinners and turn_end markers dropped the same way, blank lines kept
-// as paragraph breaks. ok is false under the same conditions as
+// spinners and turn_end markers dropped the same way isStructural drops
+// them for LastMessage, blank lines collapsed to single paragraph breaks.
+// A tool that echoes the submitted prompt back into its own transcript
+// (user_echo) has that line dropped too: LastMessage never needed to,
+// its marker anchor already starts past it, but nothing bounds this
+// method's start. ok is false under the same conditions as
 // ActivityRegion: no activity_cutoff configured, or none found in pane.
 func (e *Engine) FullTurnText(tool, pane string) (text string, ok bool) {
 	tr, ok := e.tools[tool]
@@ -389,24 +393,37 @@ func (e *Engine) FullTurnText(tool, pane string) (text string, ok bool) {
 	for _, raw := range lines {
 		line := strings.TrimRight(raw, " \t")
 		if strings.TrimSpace(line) == "" {
-			out = append(out, "")
+			if len(out) > 0 && out[len(out)-1] != "" {
+				out = append(out, "")
+			}
 			continue
 		}
-		if tr.chromeLine != nil && tr.chromeLine.MatchString(line) {
+		if tr.isStructural(line) {
 			continue
 		}
-		if tr.busyLine != nil && tr.busyLine.MatchString(line) {
-			continue
-		}
-		if tr.turnEnd != nil && tr.turnEnd.MatchString(line) {
-			continue
-		}
-		if tr.matchesWorkingRule(line) {
+		if tr.userEcho != nil && tr.userEcho.MatchString(line) {
 			continue
 		}
 		out = append(out, line)
 	}
 	return strings.TrimSpace(strings.Join(out, "\n")), true
+}
+
+// isStructural reports whether line is chrome, a busy spinner, or a
+// turn-end summary rather than message content: the one check shared by
+// LastMessage's marker search and FullTurnText's whole-region copy, so a
+// rule added to one is never missed by the other.
+func (tr toolRules) isStructural(line string) bool {
+	if tr.chromeLine != nil && tr.chromeLine.MatchString(line) {
+		return true
+	}
+	if tr.busyLine != nil && tr.busyLine.MatchString(line) {
+		return true
+	}
+	if tr.turnEnd != nil && tr.turnEnd.MatchString(line) {
+		return true
+	}
+	return tr.matchesWorkingRule(line)
 }
 
 // lastMessageParts finds the newest message's content lines, trimmed but
@@ -424,22 +441,10 @@ func (e *Engine) lastMessageParts(tool, pane string) (parts []string, anchored, 
 		return nil, false, false
 	}
 	lines := strings.Split(region, "\n")
-	structural := func(line string) bool {
-		if tr.chromeLine != nil && tr.chromeLine.MatchString(line) {
-			return true
-		}
-		if tr.busyLine != nil && tr.busyLine.MatchString(line) {
-			return true
-		}
-		if tr.turnEnd != nil && tr.turnEnd.MatchString(line) {
-			return true
-		}
-		return tr.matchesWorkingRule(line)
-	}
 	start, lastContent := -1, -1
 	for i, raw := range lines {
 		line := strings.TrimRight(raw, " \t")
-		if strings.TrimSpace(line) == "" || structural(line) {
+		if strings.TrimSpace(line) == "" || tr.isStructural(line) {
 			continue
 		}
 		lastContent = i
@@ -462,7 +467,7 @@ func (e *Engine) lastMessageParts(tool, pane string) (parts []string, anchored, 
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		if structural(line) {
+		if tr.isStructural(line) {
 			break
 		}
 		parts = append(parts, strings.TrimSpace(line))

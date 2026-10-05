@@ -31,12 +31,16 @@ func TestCommandEnvContract(t *testing.T) {
 			"AM_TOOL=claude",
 			"AM_CWD=/src/api-worktrees/am-x",
 			"AM_BRANCH=am/fix-login",
-			"AM_TITLE=deploy · claude",
+			"AM_TITLE=deploy · am-x · am/fix-login · claude",
 			"AM_BODY=" + want[1],
 		}
 		if !slices.Equal(got, expected) {
 			t.Fatalf("%s env = %q, want %q", want[0], got, expected)
 		}
+	}
+	event.Kind, event.Body = Finished, "## Fixed the **login** redirect\n\nDetails follow."
+	if got := CommandEnv(event); got[len(got)-1] != "AM_BODY=● Fixed the login redirect" {
+		t.Fatalf("a finished event with a body should carry its excerpt, got %q", got[len(got)-1])
 	}
 	if env := CommandEnv(Event{ID: "x"}); env != nil {
 		t.Fatalf("an event of no kind should have no env, got %q", env)

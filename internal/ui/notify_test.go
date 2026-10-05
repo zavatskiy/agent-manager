@@ -4,10 +4,12 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/YoanWai/agent-manager/internal/hooks"
 	"github.com/YoanWai/agent-manager/internal/notify"
 	"github.com/YoanWai/agent-manager/internal/status"
 	"github.com/YoanWai/agent-manager/internal/store"
@@ -349,6 +351,90 @@ func TestNotifyTransitionSilencedBySetting(t *testing.T) {
 	settle()
 	if calls := rec.all(); len(calls) != 0 {
 		t.Fatalf("notifications off should silence everything, got %v", calls)
+	}
+}
+
+func newHookedNotifyTestPoller(t *testing.T) (*poller, store.Session, *notifyRecorder) {
+	t.Helper()
+	p, sess, rec := newNotifyTestPoller(t)
+	sess.Tool = "claude"
+	sess.WorktreeBranch = "am/fix-login"
+	p.statusSources = map[string]string{"claude": hooks.StatusSourceClaude}
+	if err := os.MkdirAll(p.hooks.Dir(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return p, sess, rec
+}
+
+func capture(t *testing.T, p *poller, id, state, input string) {
+	t.Helper()
+	if err := hooks.Capture(strings.NewReader(input), state, p.hooks.StatusFile(id), p.hooks.BodyFile(id)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestNotifyTransitionCarriesTheHookBody(t *testing.T) {
+	p, sess, rec := newHookedNotifyTestPoller(t)
+	if err := p.store.SetSetting(notifyFinishedSetting, "on"); err != nil {
+		t.Fatal(err)
+	}
+	capture(t, p, sess.ID, status.Finished, `{"last_assistant_message":"Login works again."}`)
+	p.notifyTransition(sess, status.Finished)
+	calls := waitForCalls(t, rec, 1)
+	want := notify.Event{ID: sess.ID, Session: sess.Name, Tool: "claude", Kind: notify.Finished, Dir: sess.Cwd, Branch: "am/fix-login", Body: "Login works again."}
+	if calls[0] != want {
+		t.Fatalf("got %+v, want %+v", calls[0], want)
+	}
+}
+
+// Stop reports finished for a turn that ends on a plain-text question, and
+// the pane upgrades it to waiting: the final message is that question.
+func TestNotifyTransitionWaitingOnAFinishedHookCarriesTheFinalMessage(t *testing.T) {
+	p, sess, rec := newHookedNotifyTestPoller(t)
+	capture(t, p, sess.ID, status.Finished, `{"last_assistant_message":"Should I also migrate the tests?"}`)
+	p.notifyTransition(sess, status.Waiting)
+	if calls := waitForCalls(t, rec, 1); calls[0].Body != "Should I also migrate the tests?" {
+		t.Fatalf("body = %q, want the final message", calls[0].Body)
+	}
+}
+
+func TestNotifyTransitionFallsBackWithoutABody(t *testing.T) {
+	tests := []struct {
+		name  string
+		tool  string
+		setup func(t *testing.T, p *poller, id string)
+		kind  string
+	}{
+		{"no sidecar", "claude", func(t *testing.T, p *poller, id string) {
+			if err := os.WriteFile(p.hooks.StatusFile(id), []byte(status.Waiting), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}, status.Waiting},
+		// An Esc interrupt fires no hook, so the pane reads waiting while the
+		// file still says working and the body is the turn before.
+		{"body from an earlier turn", "claude", func(t *testing.T, p *poller, id string) {
+			capture(t, p, id, status.Finished, `{"last_assistant_message":"turn one"}`)
+			if err := os.WriteFile(p.hooks.StatusFile(id), []byte(status.Working), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}, status.Waiting},
+		{"errored", "claude", func(t *testing.T, p *poller, id string) {
+			capture(t, p, id, status.Errored, `{"message":"rate limited"}`)
+		}, status.Errored},
+		{"tool without hooks", "codex", func(t *testing.T, p *poller, id string) {
+			capture(t, p, id, status.Waiting, `{"message":"left over"}`)
+		}, status.Waiting},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			p, sess, rec := newHookedNotifyTestPoller(t)
+			sess.Tool = test.tool
+			test.setup(t, p, sess.ID)
+			p.notifyTransition(sess, test.kind)
+			if calls := waitForCalls(t, rec, 1); calls[0].Body != "" {
+				t.Fatalf("body = %q, want none", calls[0].Body)
+			}
+		})
 	}
 }
 

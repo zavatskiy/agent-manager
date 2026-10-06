@@ -180,11 +180,7 @@ func Notify(event Event) {
 	if !ok {
 		return
 	}
-	subtitle := title(event)
-	body := detail.body
-	if excerpt := Excerpt(event.Body); excerpt != "" {
-		body = detail.glyph + " " + excerpt
-	}
+	subtitle, body := content(event, detail)
 	terminalBody := body + " — " + subtitle
 	// A terminal that understands OSC 777 turns it into a native
 	// notification wherever the terminal actually is — including at the
@@ -271,6 +267,16 @@ func Excerpt(message string) string {
 		return line
 	}
 	return ""
+}
+
+// content is the title and text every channel shows for an event, the
+// native banner and the user's command alike.
+func content(event Event, detail presentation) (subtitle, body string) {
+	body = detail.body
+	if excerpt := Excerpt(event.Body); excerpt != "" {
+		body = detail.glyph + " " + excerpt
+	}
+	return title(event), body
 }
 
 // notifySend keeps the call open for the banner's lifetime when the

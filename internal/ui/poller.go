@@ -1521,7 +1521,9 @@ func (p *poller) applyHookStatus(sess store.Session, text, hookStatus string) st
 // at the manager, and the session they are watching is precisely the one
 // whose ping they must not miss. The notify command set with
 // agent-manager settings runs for the same transitions, after the native
-// banner and never instead of it.
+// banner and never instead of it. A hook-backed session's finished or
+// waiting event carries what the agent said, from its hook payload, to
+// both; every other event says the state alone.
 func (p *poller) notifyTransition(sess store.Session, newStatus string) {
 	if p.notifyFn == nil {
 		return
@@ -1544,6 +1546,9 @@ func (p *poller) notifyTransition(sess store.Session, newStatus string) {
 		return
 	}
 	event := notify.Event{ID: sess.ID, Session: sess.Name, Tool: sess.Tool, Kind: kind, Dir: sess.Cwd, Branch: sess.WorktreeBranch}
+	if kind != notify.Errored && p.statusSources[sess.Tool] == hooks.StatusSourceClaude {
+		event.Body, _ = p.hooks.ReadBody(sess.ID)
+	}
 	command, readErr := p.notifyCommand()
 	unshown := command != "" && p.claimUnshownCommand(command)
 	// Delivery can wait on an external process (osascript, notify-send,

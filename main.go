@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -99,6 +100,11 @@ func main() {
 			}
 			return
 		}
+		// The manager takes no arguments, so these name a command this
+		// binary lacks: a hook from another build calls one. Starting the
+		// TUI would only fail on the missing terminal.
+		fmt.Fprintf(os.Stderr, "agent-manager: unknown command %q\nUsage: agent-manager [command]; run agent-manager help for the list\n", os.Args[1])
+		os.Exit(2)
 	}
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "agent-manager:", err)
@@ -126,11 +132,22 @@ func subcommands() map[string]func(args []string) error {
 		"follow-telemetry": withConfigDir(func(args []string, _ func() string, configDir string) error {
 			return sessioncmd.FollowTelemetry(configDir, args)
 		}),
+		// Run by the generated Claude Code hooks, never by hand, so it stays out of the help.
+		"hook-capture": hookCapture,
 	}
 	for name, command := range cli.Commands(version, ui.SettingSpecs) {
 		table[name] = withConfigDir(command)
 	}
 	return table
+}
+
+func hookCapture(args []string) error {
+	flags := flag.NewFlagSet("hook-capture", flag.ContinueOnError)
+	state := flags.String("state", "", "the status the hook reports")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	return hooks.Capture(os.Stdin, *state, os.Getenv(hooks.EnvStatusFile), os.Getenv(hooks.EnvBodyFile))
 }
 
 func withConfigDir(command cli.Command) func([]string) error {

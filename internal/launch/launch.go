@@ -224,7 +224,7 @@ func Environment(manager *hooks.Manager, toolName string, tool config.Tool, base
 	if tool.SessionReport == sessionreport.StyleClaude {
 		trackCommand = sessionreport.HookCommand(Executable(), sessionreport.StyleClaude, "session_id")
 	}
-	settingsPath, err := manager.WriteSettings(id, launch, trackCommand)
+	settingsPath, err := manager.WriteSettings(id, launch, trackCommand, Executable())
 	if err != nil {
 		return "", nil, err
 	}
@@ -232,6 +232,7 @@ func Environment(manager *hooks.Manager, toolName string, tool config.Tool, base
 		return "", nil, err
 	}
 	env[hooks.EnvStatusFile] = manager.StatusFile(id)
+	env[hooks.EnvBodyFile] = manager.BodyFile(id)
 	return asAgentProcess(agentFile, stamp, command+" --settings "+tmux.ShellQuote(settingsPath)), env, nil
 }
 

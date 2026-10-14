@@ -752,15 +752,23 @@ func runHook(t *testing.T, command, statusFile, bodyFile string) (int, string) {
 	return 0, string(out)
 }
 
-// The binary a hook names can be gone (an upgrade moved it) or no longer
-// runnable, and the state still has to land the way it did before
-// hook-capture existed.
+// The binary a hook names can be gone (an upgrade moved it), no longer
+// runnable, or a build without hook-capture, and the state still has to
+// land the way it did before hook-capture existed.
 func TestCaptureCommandFallsBackWhenTheBinaryCannotRun(t *testing.T) {
 	for name, exe := range map[string]func(t *testing.T) string{
 		"missing (127)": func(t *testing.T) string { return filepath.Join(t.TempDir(), "gone") },
 		"not executable (126)": func(t *testing.T) string {
 			path := filepath.Join(t.TempDir(), "agent-manager")
 			if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			return path
+		},
+		"no hook-capture (2)": func(t *testing.T) string {
+			path := filepath.Join(t.TempDir(), "agent-manager")
+			stub := "#!/bin/sh\necho 'agent-manager: unknown command \"hook-capture\"' >&2\nexit 2\n"
+			if err := os.WriteFile(path, []byte(stub), 0o755); err != nil {
 				t.Fatal(err)
 			}
 			return path
@@ -790,10 +798,10 @@ func TestCaptureCommandFallsBackWhenTheBinaryCannotRun(t *testing.T) {
 
 // A hook-capture that ran and failed is not a missing binary: the plain
 // write must not paper over it, and the hook fails with its message so
-// Claude Code shows it. A panic's exit 2 would block a Stop, so every
-// failure reaches Claude Code as 1.
+// Claude Code shows it. An exit 2 from the hook would block a Stop, so
+// every failure reaches Claude Code as 1.
 func TestCaptureCommandSurfacesACaptureFailure(t *testing.T) {
-	for _, code := range []int{1, 2} {
+	for _, code := range []int{1, 3} {
 		t.Run(fmt.Sprintf("exit %d", code), func(t *testing.T) {
 			manager := NewManager(t.TempDir())
 			if err := os.MkdirAll(manager.Dir(), 0o755); err != nil {
@@ -819,6 +827,26 @@ func TestCaptureCommandSurfacesACaptureFailure(t *testing.T) {
 				t.Fatalf("the fallback touched the body: %q, %v", raw, err)
 			}
 		})
+	}
+}
+
+// A hook run outside a managed session has nowhere to record a state, and
+// one from a session launched before bodies existed has no body file; the
+// hook must not fail the turn for either.
+func TestCaptureWithoutTheSessionFiles(t *testing.T) {
+	input := `{"last_assistant_message":"done"}`
+	if err := Capture(strings.NewReader(input), status.Finished, "", ""); err != nil {
+		t.Fatalf("no status file: %v", err)
+	}
+	manager := NewManager(t.TempDir())
+	if err := os.MkdirAll(manager.Dir(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := Capture(strings.NewReader(input), status.Finished, manager.StatusFile("x"), ""); err != nil {
+		t.Fatalf("no body file: %v", err)
+	}
+	if got, ok := manager.Read("x"); !ok || got != status.Finished {
+		t.Fatalf("status = %q, %v; want finished", got, ok)
 	}
 }
 

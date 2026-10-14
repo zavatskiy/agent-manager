@@ -84,14 +84,15 @@ func statusCommand(state string) string {
 // captureCommand records the state together with the text Claude Code
 // hands the hook. The binary can be gone by the time the hook fires (an
 // upgrade moved it, or a go run build was cleaned up), which sh reports as
-// 126 or 127; only then does the plain write stand in, dropping the body,
-// which would be a turn too old. Any other failure is hook-capture's own:
-// it has written the state already, and the hook exits 1 so Claude Code
-// shows its error, as it does for any hook that fails. Never 2, which on
-// Stop would keep the turn going.
+// 126 or 127, or replaced by a build without hook-capture, which exits 2
+// on a command it does not know. Only then does the plain write stand in,
+// dropping the body, which would be a turn too old. Any other failure is
+// hook-capture's own: it has written the state already, and the hook exits
+// 1 so Claude Code shows its error, as it does for any hook that fails.
+// Never 2, which on Stop would keep the turn going.
 func captureCommand(exe, state string) string {
 	return tmux.ShellQuote(exe) + ` hook-capture --state ` + state +
-		`; case $? in 0) ;; 126|127) rm -f "$` + EnvBodyFile + `"; ` + statusCommand(state) + `;; *) exit 1;; esac`
+		`; case $? in 0) ;; 2|126|127) rm -f "$` + EnvBodyFile + `"; ` + statusCommand(state) + `;; *) exit 1;; esac`
 }
 
 // blockingNotifications are the Notification types that leave the turn
@@ -308,8 +309,13 @@ func Capture(stdin io.Reader, state, statusFile, bodyFile string) error {
 	default:
 		return fmt.Errorf("unknown state %q", state)
 	}
-	if statusFile == "" || bodyFile == "" {
-		return fmt.Errorf("%s and %s must be set", EnvStatusFile, EnvBodyFile)
+	// A hook outside a managed session has no state to record, and one
+	// from a session launched without a body file records the state alone.
+	if statusFile == "" {
+		return nil
+	}
+	if bodyFile == "" {
+		return os.WriteFile(statusFile, []byte(state), 0o644)
 	}
 	bodyErr := captureBody(stdin, state, bodyFile)
 	if bodyErr != nil {

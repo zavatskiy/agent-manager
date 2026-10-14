@@ -195,6 +195,33 @@ func TestMainReportsHeadlessStartupFailure(t *testing.T) {
 	}
 }
 
+// A command this build lacks, such as a hook from another build calling
+// it, is a usage error. It must not fall through to the TUI, which would
+// fail on the missing terminal instead.
+func TestMainRejectsAnUnknownCommandWithoutStartingTUI(t *testing.T) {
+	if prepareMainProcess() {
+		main()
+		return
+	}
+	home := t.TempDir()
+	cmd := mainTestCommand(t, "no-such-cmd")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	cmd.Env = replaceEnv(cmd.Env, "HOME", home, "XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	var stdout, stderr strings.Builder
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err := cmd.Run()
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 2 {
+		t.Fatalf("agent-manager no-such-cmd: err %v, want exit 2\nstderr: %s", err, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), `unknown command "no-such-cmd"`) || !strings.Contains(stderr.String(), "Usage: agent-manager") {
+		t.Fatalf("stderr = %q, want the unknown command and the usage", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "TTY") || stdout.Len() != 0 {
+		t.Fatalf("the TUI started: stdout %q stderr %q", stdout.String(), stderr.String())
+	}
+}
+
 // Startup is the only place the alternate-scroll reset goes out. Reading
 // the call out of the syntax tree fails if it is dropped, which is what
 // would put wheel notches back on the session cursor (#110).
@@ -393,7 +420,7 @@ func hookCaptureExe(t *testing.T) string {
 // stopHook is the Stop command the manager generates for exe.
 func stopHook(t *testing.T, manager *hooks.Manager, exe string) string {
 	t.Helper()
-	path, err := manager.WriteSettings("x", exe)
+	path, err := manager.WriteSettings("x", "0", "", exe)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -412,6 +439,40 @@ func stopHook(t *testing.T, manager *hooks.Manager, exe string) string {
 		t.Fatal(err)
 	}
 	return settings.Hooks["Stop"][0].Hooks[0].Command
+}
+
+// Stop hooks that earlier managers wrote stay in the settings file of every
+// session they launched, so this binary's hook-capture must keep answering
+// them: the state and the body land, and the hook succeeds.
+func TestStopHooksFromEarlierManagersRunHookCapture(t *testing.T) {
+	if prepareMainProcess() {
+		main()
+		return
+	}
+	exe := tmux.ShellQuote(hookCaptureExe(t))
+	for name, command := range map[string]string{
+		"fallback on any failure": exe + ` hook-capture --state finished || { rm -f "$AGENT_MANAGER_BODY_FILE"; printf finished > "$AGENT_MANAGER_STATUS_FILE"; }`,
+		"fallback on 126 or 127":  exe + ` hook-capture --state finished; case $? in 0) ;; 126|127) rm -f "$AGENT_MANAGER_BODY_FILE"; printf finished > "$AGENT_MANAGER_STATUS_FILE";; *) exit 1;; esac`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			manager := hooks.NewManager(t.TempDir())
+			if err := os.MkdirAll(manager.Dir(), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command("sh", "-c", command)
+			cmd.Env = append(os.Environ(), hooks.EnvStatusFile+"="+manager.StatusFile("x"), hooks.EnvBodyFile+"="+manager.BodyFile("x"))
+			cmd.Stdin = strings.NewReader(`{"hook_event_name":"Stop","last_assistant_message":"All tests pass."}`)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("hook: %v\n%s", err, out)
+			}
+			if state, ok := manager.Read("x"); !ok || state != "finished" {
+				t.Fatalf("status = %q, %v", state, ok)
+			}
+			if body, ok := manager.ReadBody("x"); !ok || body != "All tests pass." {
+				t.Fatalf("body = %q, %v", body, ok)
+			}
+		})
+	}
 }
 
 // The generated Stop hook runs the real hook-capture: a capture that works
